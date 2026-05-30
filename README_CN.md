@@ -137,6 +137,75 @@ index = ExactVectorIndex.from_arrays(
 ```
 
 ---
+---
+## 完整示例：书籍搜索
+
+flatvec 只负责**向量检索**。embedding 生成由你自己选模型。
+
+### 1. 生成 embedding 并存成文件
+
+```python
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")   # 384 维输出
+
+chunks = [
+    "第一章：Redis 是一个开源的内存数据库。",
+    "Redis 支持字符串、哈希、列表等多种数据结构。",
+    "缓存过期可以通过 EXPIRE 命令来设置。",
+    "向量数据库适合做语义搜索和推荐系统。",
+]
+
+embeddings = model.encode(chunks)                 # shape: (4, 384)
+np.save("book_vectors.npy", embeddings)
+np.save("book_ids.npy", np.array([f"chunk-{i}" for i in range(len(chunks))]))
+```
+
+### 2. 用 flatvec 加载并搜索
+
+```python
+from flatvec import ExactVectorIndex
+
+index = ExactVectorIndex.from_npy(
+    vectors_path="book_vectors.npy",
+    ids_path="book_ids.npy",
+    metric="cosine",
+)
+
+question = "怎么设置缓存过期"
+query_vector = model.encode([question])[0]
+results = index.search(query_vector, top_k=2)
+
+for r in results:
+    print(r.id, r.score)
+    # chunk-2, 0.89  → "缓存过期可以通过 EXPIRE 命令来设置。"
+    # chunk-0, 0.52  → "第一章：Redis 是一个开源的内存数据库。"
+```
+
+### 3. 附加 metadata，搜索时直接取回原文
+
+```python
+# 在保存向量时一起保存 metadata
+import json
+metadata = [{"text": chunk} for chunk in chunks]
+json.dump(metadata, open("book_metadata.json", "w"), ensure_ascii=False)
+
+index = ExactVectorIndex.from_npy(
+    vectors_path="book_vectors.npy",
+    ids_path="book_ids.npy",
+    metadata_path="book_metadata.json",
+    metric="cosine",
+)
+
+results = index.search(query_vector, top_k=2)
+for r in results:
+    print(r.metadata["text"])   # 直接打印原文
+```
+
+flatvec 不限制你用哪个 embedding 模型——只要能输出 `.npy` 文件就行。
+384、768、1024、4096 等任意维度都支持。
+
 
 ## 保存与恢复
 
