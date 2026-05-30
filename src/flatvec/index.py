@@ -80,7 +80,6 @@ class ExactVectorIndex:
         self.dim = dim
         self.metric = metric
         self._vectors = np.empty((0, dim), dtype=np.float32)
-        self._vectors_t = np.empty((dim, 0), dtype=np.float32)
         self._l2_norms = np.empty(0, dtype=np.float32)
         self._ids: list[str] = []
         self._metadata: list[dict[str, Any] | None] = []
@@ -119,7 +118,6 @@ class ExactVectorIndex:
                 new_metadata.append(payload)
             else:
                 self._vectors[pos] = vector
-                self._vectors_t[:, pos] = vector
                 self._l2_norms[pos] = float(np.dot(vector, vector))
                 self._metadata[pos] = payload
 
@@ -128,7 +126,6 @@ class ExactVectorIndex:
             self._metadata.extend(new_metadata)
             appended = np.asarray(new_rows, dtype=np.float32)
             self._vectors = np.concatenate([self._vectors, appended], axis=0)
-            self._vectors_t = np.concatenate([self._vectors_t, appended.T], axis=1)
             appended_norms = np.einsum("ij,ij->i", appended, appended, dtype=np.float32)
             self._l2_norms = np.concatenate([self._l2_norms, appended_norms], axis=0)
 
@@ -145,7 +142,6 @@ class ExactVectorIndex:
             keep_mask[pos] = False
 
         self._vectors = self._vectors[keep_mask]
-        self._vectors_t = self._vectors_t[:, keep_mask]
         self._l2_norms = self._l2_norms[keep_mask]
         self._ids = [idx for idx, keep in zip(self._ids, keep_mask, strict=True) if keep]
         self._metadata = [
@@ -400,7 +396,6 @@ class ExactVectorIndex:
         index = cls(dim=vectors.shape[1], metric=metric)
         matrix = index._coerce_matrix(vectors, pre_normalized=pre_normalized)
         index._vectors = matrix
-        index._vectors_t = np.ascontiguousarray(matrix.T)
         index._l2_norms = np.einsum("ij,ij->i", matrix, matrix, dtype=np.float32)
         index._ids = list(ids)
         index._metadata = list(metadata) if metadata is not None else [None] * len(ids)
@@ -438,13 +433,13 @@ class ExactVectorIndex:
 
     def _search_single(self, query: np.ndarray, top_k: int) -> tuple[np.ndarray, np.ndarray]:
         if self.metric in {"cosine", "ip"}:
-            scores = query @ self._vectors_t
+            scores = self._vectors @ query
             positions = np.argpartition(scores, -top_k)[-top_k:]
             ordered = positions[np.argsort(scores[positions])[::-1]]
             return scores[ordered], ordered
 
         query_norm = float(np.dot(query, query))
-        distances = self._l2_norms + query_norm - (2.0 * (query @ self._vectors_t))
+        distances = self._l2_norms + query_norm - (2.0 * (self._vectors @ query))
         positions = np.argpartition(distances, top_k - 1)[:top_k]
         ordered = positions[np.argsort(distances[positions])]
         return -distances[ordered], ordered
@@ -455,7 +450,7 @@ class ExactVectorIndex:
         top_k: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         if self.metric in {"cosine", "ip"}:
-            scores = queries @ self._vectors_t
+            scores = queries @ self._vectors.T
             positions = np.argpartition(scores, -top_k, axis=1)[:, -top_k:]
             top_scores = np.take_along_axis(scores, positions, axis=1)
             order = np.argsort(top_scores, axis=1)[:, ::-1]
@@ -464,7 +459,7 @@ class ExactVectorIndex:
             return sorted_scores, sorted_positions
 
         query_norms = np.einsum("ij,ij->i", queries, queries, dtype=np.float32)[:, None]
-        distances = self._l2_norms[None, :] + query_norms - (2.0 * (queries @ self._vectors_t))
+        distances = self._l2_norms[None, :] + query_norms - (2.0 * (queries @ self._vectors.T))
         positions = np.argpartition(distances, top_k - 1, axis=1)[:, :top_k]
         top_distances = np.take_along_axis(distances, positions, axis=1)
         order = np.argsort(top_distances, axis=1)
