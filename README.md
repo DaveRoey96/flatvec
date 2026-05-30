@@ -1,48 +1,51 @@
 # flatvec
 
-`flatvec` is a tiny exact in-memory vector retrieval library for local datasets. It is built on `NumPy`, loads vectors from local files, keeps everything in RAM, and avoids database-style dependencies.
+A tiny exact in-memory vector retrieval library.  One dependency: `numpy`.
 
-This project is intentionally narrow:
+Load embeddings from local files, keep them in RAM, search with exact top-k
+precision.  No database.  No server.  No ANN graph index.
 
-- exact search only
-- single-process
-- in-memory
-- local-file first
-- one runtime dependency: `numpy`
+---
 
-It is a good fit when your dataset is small enough to stay in memory and you want a library, not a vector database.
+## Why this library exists
 
-## Why this project exists
+Most vector search tools try to do everything: ANN indexes, distributed
+shards, WAL-based persistence, complex filtering, cloud-native orchestration.
+That is the right tradeoff when you have millions of vectors and a production
+search team.
 
-Many vector systems are optimized for scale-out features:
+But there is a much simpler case that is often underserved:
 
-- background indexing
-- WAL and storage orchestration
-- shards and replicas
-- service discovery
-- distributed query paths
+> I have tens of thousands of embeddings.  I want to keep them in memory,
+> load them from local files, and get exact top-k results fast.  I do not
+> want to stand up a database.
 
-That is often unnecessary for:
+That case is exactly what **flatvec** is for.
 
-- local AI tools
-- small semantic search projects
-- knowledge bases under `100k`
-- prototypes that need exact results
+### Why exact instead of approximate
 
-`flatvec` focuses on the simple case:
+Approximate nearest-neighbour indexes like HNSW are faster when the corpus is
+large, but they come with real costs:
 
-- load vectors from disk
-- keep them in memory
-- run exact top-k search
-- keep the API small
+- **build time** — constructing the graph can take minutes or hours.
+- **recall loss** — you may miss some of the truly closest neighbours.
+- **engineering complexity** — parameters must be tuned and updates are expensive.
+
+For corpora under 100k vectors, exact search is often fast enough, simpler to
+reason about, and a great correctness baseline.
+
+---
 
 ## Features
 
 - exact search with `cosine`, `ip`, or `l2`
-- `upsert`, `delete`, `search`, `batch_search`
-- snapshot save/load
-- load directly from `.npy` or `.npz`
-- no runtime dependency beyond `numpy`
+- `upsert`, `delete`, `search`, `batch_search`, `raw_search`
+- load directly from `.npy`, `.npz`, or memory-mapped files
+- snapshot save / load
+- `set_blas_threads` / `get_blas_threads` for performance tuning
+- zero runtime dependencies beyond `numpy`
+
+---
 
 ## Installation
 
@@ -57,6 +60,8 @@ Install test tools:
 ```bash
 pip install -e ".[dev]"
 ```
+
+---
 
 ## Quick start
 
@@ -85,17 +90,13 @@ Run the demo:
 flatvec-demo
 ```
 
-Run a quick benchmark:
-
-```bash
-flatvec-bench --count 100000 --dim 128 --queries 100 --top-k 10
-```
-
-Tune OpenBLAS threads during benchmarking:
+Run a benchmark:
 
 ```bash
 flatvec-bench --count 100000 --dim 128 --queries 100 --top-k 10 --threads 2
 ```
+
+---
 
 ## Load from local files
 
@@ -115,16 +116,31 @@ index = ExactVectorIndex.from_npy(
 From `.npz`:
 
 ```python
-from flatvec import ExactVectorIndex
-
 index = ExactVectorIndex.from_npz("dataset.npz", metric="cosine")
 ```
 
-Expected `.npz` keys:
+Expected `.npz` keys: `vectors`, optional `ids`, optional `metadata`.
 
-- `vectors`
-- optional `ids`
-- optional `metadata`
+Memory-mapped (zero-copy) loading:
+
+```python
+index = ExactVectorIndex.from_npy_mmap(
+    vectors_path="vectors.npy",
+    ids_path="ids.npy",
+    metric="cosine",
+    mmap_mode="r",
+)
+```
+
+Directly from in-memory arrays (fast path, no Python loop):
+
+```python
+index = ExactVectorIndex.from_arrays(
+    vectors=my_vectors, ids=my_ids, metric="cosine"
+)
+```
+
+---
 
 ## Save and reload
 
@@ -133,82 +149,79 @@ index.save("snapshot")
 restored = ExactVectorIndex.load("snapshot")
 ```
 
-Saved files:
+Saved files: `manifest.json`, `vectors.npy`, `ids.npy`, `metadata.json`.
 
-- `manifest.json`
-- `vectors.npy`
-- `ids.npy`
-- `metadata.json`
+---
 
 ## API
 
-Core methods:
-
 - `ExactVectorIndex(dim, metric="cosine")`
-- `set_blas_threads(threads)`
-- `get_blas_threads()`
 - `upsert(ids, vectors, metadata=None)`
 - `delete(ids)`
-- `search(query, top_k=10)`
+- `search(query, top_k=10)` — returns `list[SearchResult]`
+- `raw_search(query, top_k=10)` — returns `(scores, positions)` arrays, no object allocation
 - `batch_search(queries, top_k=10)`
 - `save(directory)`
 - `load(directory)`
-- `from_arrays(...)`
-- `from_npy(...)`
-- `from_npz(...)`
+- `from_npy(...)` / `from_npz(...)` / `from_npy_mmap(...)` / `from_arrays(...)`
 - `stats()`
+- `set_blas_threads(n)` / `get_blas_threads()`
 
-## Performance notes
+---
 
-This library uses exact search, so query time grows roughly linearly with dataset size.
+## Performance
 
-On one local machine with `128`-dimensional vectors:
+Exact search means query time grows roughly linearly with dataset size.
+On one local machine with 128-dimensional vectors (cosine, 2 OpenBLAS threads):
 
-- `20k`: about `0.75ms/query`
-- `50k`: about `1.98ms/query`
-- `100k`: about `5.27ms/query`
-- `200k`: about `17.90ms/query`
+| dataset size | avg query time | QPS    |
+|--------------|----------------|--------|
+| 20 000       | 0.41 ms        | 2 440  |
+| 50 000       | 1.39 ms        | 718    |
+| 100 000      | 5.11 ms        | 196    |
 
-That makes `flatvec` especially suitable for:
+100k vectors fit in ~51 MB of RAM (`float32`).
 
-- `10k` to `100k` vectors
-- exact search baselines
-- local-first applications
-- low-dependency embedding search
+Additional fast paths:
 
-For local file workflows, prefer `from_arrays`, `from_npy`, or `load` over repeated `upsert` calls. On one local machine with `100k x 128` vectors:
+- `raw_search` — returns plain `(scores, positions)` numpy arrays, ~20% faster than `search`.
+- `from_npy_mmap` — memory-maps the vectors file; the kernel pages data in on demand.
+- `from_arrays` — builds the index directly from an in-memory matrix, avoiding the per-row Python loop of `upsert`.
 
-- `upsert` build: about `1215ms`
-- `from_arrays` build: about `228ms`
-- `load` from saved snapshot: about `437ms`
-
-For some CPUs, small exact-search workloads run better with a low OpenBLAS thread count. On this local machine, `100k x 128` cosine search was fastest around `2` threads.
+---
 
 ## Good use cases
 
 - local semantic search for notes or documents
-- FAQ and support article retrieval
-- internal wiki search
-- exact duplicate or near-duplicate checks
-- small recommendation candidate search
+- FAQ and support-article retrieval
+- internal wiki or knowledge-base search
+- exact duplicate / near-duplicate detection
+- small recommendation-candidate recall
 - local RAG experiments
 
-## Non-goals
+## When flatvec is not the right tool
 
-- distributed search
-- ANN indexes
-- background compaction
-- database features
-- advanced filtering engines
+- datasets well above 100k where latency starts to bite
+- workloads that need concurrent writes and high-throughput updates
+- production services that require replicas and failover
+- users who need HNSW or IVF-based ANN indexes
+
+For those cases, heavier tools like Faiss, Qdrant, or Milvus are the right
+step — and flatvec can still serve as the exact baseline you measure them
+against.
+
+---
 
 ## Project layout
 
 ```text
-src/flatvec/index.py      Core exact vector index
-src/flatvec/demo.py       Small local demo
-src/flatvec/benchmark.py  Simple latency benchmark
-tests/test_index.py       Basic correctness tests
+src/flatvec/index.py        Core exact vector index
+src/flatvec/demo.py         Small local demo
+src/flatvec/benchmark.py    Simple latency benchmark
+tests/test_index.py         Correctness tests
 ```
+
+---
 
 ## License
 
