@@ -149,19 +149,195 @@ restored = ExactVectorIndex.load("snapshot")
 
 ---
 
-## API
+## API 参考
 
-- `ExactVectorIndex(dim, metric="cosine")`
-- `upsert(ids, vectors, metadata=None)`
-- `delete(ids)`
-- `search(query, top_k=10)` — 返回 `list[SearchResult]`
-- `raw_search(query, top_k=10)` — 返回 `(scores, positions)` 数组，零对象分配
-- `batch_search(queries, top_k=10)`
-- `save(directory)`
-- `load(directory)`
-- `from_npy(...)` / `from_npz(...)` / `from_npy_mmap(...)` / `from_arrays(...)`
-- `stats()`
-- `set_blas_threads(n)` / `get_blas_threads()`
+### 构造函数
+
+```python
+ExactVectorIndex(dim: int, metric: Literal["cosine", "ip", "l2"] = "cosine")
+```
+
+创建一个固定维度的空索引。
+
+| 参数     | 类型   | 默认值     | 说明                    |
+|----------|--------|------------|-------------------------|
+| `dim`    | `int`  | *必填*     | 向量维度（必须 > 0）     |
+| `metric` | `str`  | `"cosine"` | 距离度量方式             |
+
+---
+
+### 属性
+
+```python
+index.size  # int — 当前已存储的向量数量
+```
+
+---
+
+### 写入操作
+
+```python
+index.upsert(
+    ids: list[str],
+    vectors: np.ndarray,           # shape (n, dim), float32
+    metadata: list[dict | None] | None = None,
+    *,
+    pre_normalized: bool = False,
+) -> None
+```
+
+插入新向量或按 id 更新已有向量。已存在的 id 会原地更新。
+
+| 参数              | 类型                   | 默认值 | 说明                                |
+|-------------------|------------------------|--------|-------------------------------------|
+| `ids`             | `list[str]`            | *必填* | 唯一标识符                          |
+| `vectors`         | `np.ndarray`           | *必填* | shape `(n, dim)`, dtype `float32`   |
+| `metadata`        | `list[dict | None]`    | `None` | 每条向量附带的自定义信息，长度需与 ids 一致 |
+| `pre_normalized`  | `bool`                 | `False`| 向量已归一化，跳过 cosine 归一化步骤   |
+
+```python
+index.delete(ids: list[str]) -> int
+```
+
+按 id 删除向量。返回实际删除的数量。
+
+---
+
+### 搜索
+
+```python
+index.search(
+    query: np.ndarray,    # shape (dim,), float32
+    top_k: int = 10,
+) -> list[SearchResult]
+```
+
+返回最近的 `top_k` 个近邻。每个 `SearchResult` 有三个字段：
+`id` (`str`)、`score` (`float`)、`metadata` (`dict | None`)。
+
+```python
+index.raw_search(
+    query: np.ndarray,    # shape (dim,), float32
+    top_k: int = 10,
+) -> tuple[np.ndarray, np.ndarray]
+```
+
+与 `search` 结果相同，但返回原始 `(scores, positions)` 数组，不创建
+`SearchResult` 对象。`scores` 为 `float32`，`positions` 为 `int64`。
+比 `search` 快约 20%。
+
+```python
+index.batch_search(
+    queries: np.ndarray,  # shape (n, dim), float32
+    top_k: int = 10,
+) -> list[list[SearchResult]]
+```
+
+一次搜索多个查询。每个查询行返回一个 `list[SearchResult]`。
+
+---
+
+### 持久化
+
+```python
+index.save(directory: str | Path) -> None
+```
+
+将索引写入磁盘。生成四个文件：`manifest.json`、`vectors.npy`、`ids.npy`、
+`metadata.json`。
+
+```python
+ExactVectorIndex.load(directory: str | Path) -> ExactVectorIndex
+```
+
+恢复之前用 `save()` 保存的索引。
+
+---
+
+### 工厂方法（从外部文件加载）
+
+```python
+ExactVectorIndex.from_arrays(
+    *,
+    vectors: np.ndarray,                          # shape (n, dim)
+    ids: list[str] | None = None,
+    metadata: list[dict | None] | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+直接从内存矩阵构建索引。比 `upsert` 更快，因为跳过了逐行 Python 循环。
+
+```python
+ExactVectorIndex.from_npy(
+    *,
+    vectors_path: str | Path,
+    ids_path: str | Path | None = None,
+    metadata_path: str | Path | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+从 `.npy` 文件加载向量。
+
+```python
+ExactVectorIndex.from_npz(
+    path: str | Path,
+    *,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    vectors_key: str = "vectors",
+    ids_key: str = "ids",
+    metadata_key: str = "metadata",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+从 `.npz` 压缩包加载向量。
+
+```python
+ExactVectorIndex.from_npy_mmap(
+    *,
+    vectors_path: str | Path,
+    ids_path: str | Path | None = None,
+    metadata_path: str | Path | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+    mmap_mode: Literal["r", "r+", "c"] = "r",
+) -> ExactVectorIndex
+```
+
+内存映射向量文件，避免全量复制到 RAM。内核按需分页。
+返回的索引中向量缓冲区为只读——调用 `upsert` 或 `delete` 会复制一份私有副本。
+
+---
+
+### 信息查询
+
+```python
+index.stats() -> dict
+```
+
+返回一个字典，包含 `size`、`dim`、`metric`、`vector_bytes`、
+`bytes_per_vector`。
+
+---
+
+### 性能调优
+
+```python
+set_blas_threads(threads: int) -> bool
+```
+
+设置当前进程的 OpenBLAS 线程数。成功返回 `True`，当前 NumPy 构建不支持
+该功能时返回 `False`。
+
+```python
+get_blas_threads() -> int | None
+```
+
+返回当前 OpenBLAS 线程数，不可用时返回 `None`。
 
 ---
 

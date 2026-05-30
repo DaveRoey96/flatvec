@@ -155,19 +155,201 @@ Saved files: `manifest.json`, `vectors.npy`, `ids.npy`, `metadata.json`.
 
 ---
 
-## API
+## API Reference
 
-- `ExactVectorIndex(dim, metric="cosine")`
-- `upsert(ids, vectors, metadata=None)`
-- `delete(ids)`
-- `search(query, top_k=10)` — returns `list[SearchResult]`
-- `raw_search(query, top_k=10)` — returns `(scores, positions)` arrays, no object allocation
-- `batch_search(queries, top_k=10)`
-- `save(directory)`
-- `load(directory)`
-- `from_npy(...)` / `from_npz(...)` / `from_npy_mmap(...)` / `from_arrays(...)`
-- `stats()`
-- `set_blas_threads(n)` / `get_blas_threads()`
+### Constructor
+
+```python
+ExactVectorIndex(dim: int, metric: Literal["cosine", "ip", "l2"] = "cosine")
+```
+
+Create an empty index for vectors of a fixed dimension.
+
+| param    | type   | default    | description                        |
+|----------|--------|------------|------------------------------------|
+| `dim`    | `int`  | *required* | vector dimension (must be > 0)     |
+| `metric` | `str`  | `"cosine"` | distance metric                    |
+
+---
+
+### Properties
+
+```python
+index.size  # int — number of vectors currently stored
+```
+
+---
+
+### Write operations
+
+```python
+index.upsert(
+    ids: list[str],
+    vectors: np.ndarray,           # shape (n, dim), float32
+    metadata: list[dict | None] | None = None,
+    *,
+    pre_normalized: bool = False,
+) -> None
+```
+
+Insert new vectors or update existing ones by id.  IDs that already exist
+are updated in-place.
+
+| param              | type                   | default | description                                      |
+|--------------------|------------------------|---------|--------------------------------------------------|
+| `ids`              | `list[str]`            | *req*   | unique identifiers                               |
+| `vectors`          | `np.ndarray`           | *req*   | shape `(n, dim)`, dtype `float32`                |
+| `metadata`         | `list[dict | None]`    | `None`  | optional payload per vector, same length as ids  |
+| `pre_normalized`   | `bool`                 | `False` | skip cosine normalisation (vectors already unit) |
+
+```python
+index.delete(ids: list[str]) -> int
+```
+
+Remove vectors by id.  Returns the number of vectors actually deleted.
+
+---
+
+### Search
+
+```python
+index.search(
+    query: np.ndarray,    # shape (dim,), float32
+    top_k: int = 10,
+) -> list[SearchResult]
+```
+
+Return the `top_k` nearest neighbours.  Each `SearchResult` has three
+fields: `id` (`str`), `score` (`float`), and `metadata` (`dict | None`).
+
+```python
+index.raw_search(
+    query: np.ndarray,    # shape (dim,), float32
+    top_k: int = 10,
+) -> tuple[np.ndarray, np.ndarray]
+```
+
+Same result as `search`, but returned as raw `(scores, positions)` arrays
+without `SearchResult` object overhead.  `scores` is `float32`,
+`positions` is `int64`.  Roughly 20% faster than `search`.
+
+```python
+index.batch_search(
+    queries: np.ndarray,  # shape (n, dim), float32
+    top_k: int = 10,
+) -> list[list[SearchResult]]
+```
+
+Search multiple queries at once.  Returns one `list[SearchResult]` per
+query row.
+
+---
+
+### Persistence
+
+```python
+index.save(directory: str | Path) -> None
+```
+
+Write the index to disk.  Produces four files: `manifest.json`,
+`vectors.npy`, `ids.npy`, `metadata.json`.
+
+```python
+ExactVectorIndex.load(directory: str | Path) -> ExactVectorIndex
+```
+
+Restore an index previously written with `save()`.
+
+---
+
+### Factory methods (load from external files)
+
+```python
+ExactVectorIndex.from_arrays(
+    *,
+    vectors: np.ndarray,                          # shape (n, dim)
+    ids: list[str] | None = None,
+    metadata: list[dict | None] | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+Build an index directly from an in-memory matrix.  Faster than `upsert`
+because it avoids the per-row Python loop.
+
+```python
+ExactVectorIndex.from_npy(
+    *,
+    vectors_path: str | Path,
+    ids_path: str | Path | None = None,
+    metadata_path: str | Path | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+Load vectors from `.npy` files.
+
+```python
+ExactVectorIndex.from_npz(
+    path: str | Path,
+    *,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    vectors_key: str = "vectors",
+    ids_key: str = "ids",
+    metadata_key: str = "metadata",
+    pre_normalized: bool = False,
+) -> ExactVectorIndex
+```
+
+Load vectors from a `.npz` archive.
+
+```python
+ExactVectorIndex.from_npy_mmap(
+    *,
+    vectors_path: str | Path,
+    ids_path: str | Path | None = None,
+    metadata_path: str | Path | None = None,
+    metric: Literal["cosine", "ip", "l2"] = "cosine",
+    pre_normalized: bool = False,
+    mmap_mode: Literal["r", "r+", "c"] = "r",
+) -> ExactVectorIndex
+```
+
+Memory-map the vectors file instead of copying it into RAM.  The kernel
+pages data in on demand.  The returned index is effectively read-only
+for the vectors buffer — calling `upsert` or `delete` materialises a
+private copy.
+
+---
+
+### Introspection
+
+```python
+index.stats() -> dict
+```
+
+Return a dictionary with `size`, `dim`, `metric`, `vector_bytes`, and
+`bytes_per_vector`.
+
+---
+
+### Performance tuning
+
+```python
+set_blas_threads(threads: int) -> bool
+```
+
+Set the number of OpenBLAS threads for the current process.  Returns
+`True` on success, `False` when the local NumPy build does not expose
+the function.
+
+```python
+get_blas_threads() -> int | None
+```
+
+Return the current OpenBLAS thread count, or `None` if unavailable.
 
 ---
 
