@@ -1,5 +1,7 @@
 # flatvec
 
+[English](README.md) | [中文](README_CN.md)
+
 A tiny exact in-memory vector retrieval library.  One dependency: `numpy`.
 
 Load embeddings from local files, keep them in RAM, search with exact top-k
